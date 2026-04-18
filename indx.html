@@ -1,0 +1,294 @@
+```html
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<title>回路清書ツール</title>
+<style>
+  body{margin:0;font-family:sans-serif;}
+  #toolbar{position:fixed;top:0;left:0;right:0;background:#fff;border-bottom:1px solid #ccc;padding:6px;display:flex;gap:8px;align-items:center;z-index:10;}
+  #canvas{position:absolute;top:48px;left:0;width:100vw;height:calc(100vh - 48px);background:#f5f5f5;}
+  .btn{padding:4px 8px;border:1px solid #888;cursor:pointer;background:#eee;}
+  .active{background:#cce;}
+  .hidden{display:none;}
+</style>
+</head>
+<body>
+
+<div id="toolbar">
+  回路:
+  <select id="circuitSelect"></select>
+
+  モード:
+  <button class="btn active" data-mode="point">点</button>
+  <button class="btn" data-mode="junction">ジョイント</button>
+  <button class="btn" data-mode="label">回路番号</button>
+  <button class="btn" data-mode="bend">曲げ</button>
+  <button class="btn" data-mode="erase">白ペイント</button>
+  <button class="btn" data-mode="move">移動</button>
+
+  <input type="file" id="fileInput" />
+  <button class="btn" onclick="saveJSON()">保存</button>
+  <button class="btn" onclick="loadJSON()">読込</button>
+  <button class="btn" onclick="printPDF()">印刷/PDF</button>
+  <button class="btn" onclick="sendMail()">メール送信</button>
+</div>
+
+<svg id="canvas"></svg>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+
+<script>
+const svg = document.getElementById("canvas");
+
+let nodes = [];
+let edges = [];
+let mode = "point";
+let nodeId = 1;
+let currentCircuit = "100-1";
+let dragging = null;
+
+// 回路プルダウン生成
+const sel = document.getElementById("circuitSelect");
+for(let v of ["100","200"]){
+  for(let i=1;i<=30;i++){
+    const opt = document.createElement("option");
+    opt.value = v+"-"+i;
+    opt.textContent = (v==="100"?"○":"◎")+i;
+    sel.appendChild(opt);
+  }
+}
+sel.onchange = ()=> currentCircuit = sel.value;
+
+// モード切替
+document.querySelectorAll("[data-mode]").forEach(b=>{
+  b.onclick = ()=>{
+    document.querySelectorAll("[data-mode]").forEach(x=>x.classList.remove("active"));
+    b.classList.add("active");
+    mode = b.dataset.mode;
+  }
+});
+
+// ノード追加
+function addNode(x,y,type){
+  nodes.push({id:"N"+nodeId++, x,y, type, circuit:currentCircuit});
+  rebuild();
+}
+
+// 再構築
+function rebuild(){
+  edges = [];
+  const circuits = {};
+
+  nodes.forEach(n=>{
+    if(!circuits[n.circuit]) circuits[n.circuit]=[];
+    circuits[n.circuit].push(n);
+  });
+
+  Object.values(circuits).forEach(list=>{
+    const points = list.filter(n=>n.type==="point");
+    const junctions = list.filter(n=>n.type==="junction");
+    const labels = list.filter(n=>n.type==="label");
+
+    points.forEach((p,i)=>{
+      const j = junctions[Math.floor(i/10)];
+      if(j){
+        edges.push({from:p.id,to:j.id,bends:[]});
+      }
+    });
+
+    for(let i=0;i<junctions.length-1;i++){
+      edges.push({from:junctions[i].id,to:junctions[i+1].id,bends:[]});
+    }
+
+    if(labels[0] && junctions[0]){
+      edges.push({from:labels[0].id,to:junctions[0].id,bends:[]});
+    }
+  });
+
+  redraw();
+}
+
+// 描画
+function redraw(){
+  svg.innerHTML="";
+
+  // 線
+  edges.forEach(e=>{
+    const a = nodes.find(n=>n.id===e.from);
+    const b = nodes.find(n=>n.id===e.to);
+    let d=`M ${a.x} ${a.y}`;
+    e.bends.forEach(p=> d+=` L ${p.x} ${p.y}`);
+    d+=` L ${b.x} ${b.y}`;
+
+    const path=document.createElementNS("http://www.w3.org/2000/svg","path");
+    path.setAttribute("d",d);
+    path.setAttribute("stroke","black");
+    path.setAttribute("fill","none");
+
+    if(mode==="bend"){
+      path.onclick=(ev)=>{
+        e.bends.push({x:ev.offsetX,y:ev.offsetY});
+        redraw();
+      };
+    }
+
+    svg.appendChild(path);
+  });
+
+  // ノード
+  nodes.forEach(n=>{
+    const g=document.createElementNS("http://www.w3.org/2000/svg","g");
+    g.setAttribute("transform",`translate(${n.x},${n.y})`);
+
+    if(n.type==="point"){
+      const c=document.createElementNS("http://www.w3.org/2000/svg","circle");
+      c.setAttribute("r",4);
+      c.setAttribute("fill","red");
+      g.appendChild(c);
+    }
+
+    if(n.type==="junction"){
+      const r=document.createElementNS("http://www.w3.org/2000/svg","rect");
+      r.setAttribute("x",-6);
+      r.setAttribute("y",-6);
+      r.setAttribute("width",12);
+      r.setAttribute("height",12);
+      r.setAttribute("fill","none");
+      r.setAttribute("stroke","black");
+      g.appendChild(r);
+    }
+
+    if(n.type==="label"){
+      const circle=document.createElementNS("http://www.w3.org/2000/svg","circle");
+      circle.setAttribute("r",10);
+      circle.setAttribute("fill","white");
+      circle.setAttribute("stroke","black");
+      g.appendChild(circle);
+
+      if(n.circuit.startsWith("200")){
+        const c2=document.createElementNS("http://www.w3.org/2000/svg","circle");
+        c2.setAttribute("r",14);
+        c2.setAttribute("fill","none");
+        c2.setAttribute("stroke","black");
+        g.appendChild(c2);
+      }
+
+      const t=document.createElementNS("http://www.w3.org/2000/svg","text");
+      t.textContent=n.circuit.split("-")[1];
+      t.setAttribute("text-anchor","middle");
+      t.setAttribute("dy",".3em");
+      g.appendChild(t);
+    }
+
+    if(mode==="move"){
+      g.onmousedown=()=> dragging=n;
+    }
+
+    svg.appendChild(g);
+  });
+}
+
+// マウス操作
+svg.onclick=(e)=>{
+  if(e.target!==svg) return;
+
+  if(mode==="point") addNode(e.offsetX,e.offsetY,"point");
+  if(mode==="junction") addNode(e.offsetX,e.offsetY,"junction");
+  if(mode==="label") addNode(e.offsetX,e.offsetY,"label");
+  if(mode==="erase"){
+    const r=document.createElementNS("http://www.w3.org/2000/svg","rect");
+    r.setAttribute("x",e.offsetX-10);
+    r.setAttribute("y",e.offsetY-10);
+    r.setAttribute("width",20);
+    r.setAttribute("height",20);
+    r.setAttribute("fill","white");
+    svg.appendChild(r);
+  }
+};
+
+svg.onmousemove=(e)=>{
+  if(dragging){
+    dragging.x=e.offsetX;
+    dragging.y=e.offsetY;
+    redraw();
+  }
+};
+svg.onmouseup=()=> dragging=null;
+
+// ファイル読込（画像/PDF）
+document.getElementById("fileInput").onchange=async(e)=>{
+  const file=e.target.files[0];
+  if(file.type==="application/pdf"){
+    const reader=new FileReader();
+    reader.onload=async()=>{
+      const pdf=await pdfjsLib.getDocument({data:new Uint8Array(reader.result)}).promise;
+      const page=await pdf.getPage(1);
+      const viewport=page.getViewport({scale:1.5});
+      const canvas=document.createElement("canvas");
+      const ctx=canvas.getContext("2d");
+      canvas.width=viewport.width;
+      canvas.height=viewport.height;
+      await page.render({canvasContext:ctx,viewport}).promise;
+
+      const img=document.createElementNS("http://www.w3.org/2000/svg","image");
+      img.setAttribute("href",canvas.toDataURL());
+      img.setAttribute("width",canvas.width);
+      img.setAttribute("height",canvas.height);
+      svg.appendChild(img);
+    };
+    reader.readAsArrayBuffer(file);
+  }else{
+    const url=URL.createObjectURL(file);
+    const img=document.createElementNS("http://www.w3.org/2000/svg","image");
+    img.setAttribute("href",url);
+    img.setAttribute("width","100%");
+    img.setAttribute("height","100%");
+    svg.appendChild(img);
+  }
+};
+
+// 保存
+function saveJSON(){
+  const data=JSON.stringify({nodes,edges});
+  const blob=new Blob([data],{type:"application/json"});
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(blob);
+  a.download="cad.json";
+  a.click();
+}
+
+// 読込
+function loadJSON(){
+  const input=document.createElement("input");
+  input.type="file";
+  input.onchange=e=>{
+    const file=e.target.files[0];
+    const reader=new FileReader();
+    reader.onload=()=>{
+      const d=JSON.parse(reader.result);
+      nodes=d.nodes;
+      edges=d.edges;
+      redraw();
+    };
+    reader.readAsText(file);
+  };
+  input.click();
+}
+
+// 印刷
+function printPDF(){
+  window.print();
+}
+
+// メール送信
+function sendMail(){
+  const subject="回路図面";
+  const body="PDFを添付して送付します。";
+  window.location.href=`mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+}
+</script>
+
+</body>
+</html>
+```
